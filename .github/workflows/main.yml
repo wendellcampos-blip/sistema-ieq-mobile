@@ -1,37 +1,340 @@
-name: Build Android APK
+import flet as ft
+import pg8000.native
+import base64
+from datetime import datetime
 
-on:
-  push:
-    branches:
-      - main
+# =======================================================
+# ⚙️ CONFIGURAÇÕES (Banco de Dados)
+# =======================================================
+DB_HOST = "db.phqsoznnrrcjyebzyfht.supabase.co"
+DB_NAME = "postgres"
+DB_USER = "postgres"
+DB_PASS = "Ieqcentral2026*"
+DB_PORT = "5432"
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v3
+# Cores do App
+COLOR_PRIMARY = "#3B82F6"      # Azul
+COLOR_BG = "#F3F4F6"           # Fundo Cinza Claro
+COLOR_WHITE = "#FFFFFF"
+COLOR_HEADER = "#1E293B"       # Azul Escuro
 
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
+# Estado Global (Salva quem está logado)
+class AppState:
+    usuario = None
+    aula_id = None
+    temp_img = None 
 
-    - name: Install Dependencies
-      run: |
-        pip install -r requirements.txt
-        pip install flet
+state = AppState()
 
-    - name: Setup Flutter
-      uses: subosito/flutter-action@v2
-      with:
-        flutter-version: '3.19.0'
+# Função de Conexão Segura para Android
+def get_conn():
+    try:
+        return pg8000.native.Connection(
+            user=DB_USER, 
+            password=DB_PASS, 
+            host=DB_HOST, 
+            port=int(DB_PORT), 
+            database=DB_NAME,
+            ssl_context=True
+        )
+    except Exception as e:
+        print(f"Erro Conexão: {e}")
+        return None
 
-    - name: Flet Build APK
-      run: |
-        flet build apk --verbose
+def main(page: ft.Page):
+    # Ajustes da tela do celular
+    page.title = "IEQ Mobile"
+    page.theme_mode = ft.ThemeMode.LIGHT
+    page.padding = 0
+    page.bgcolor = COLOR_BG
+    
+    # Utilitário: Mostrar mensagem na parte inferior (SnackBar)
+    def show_snack(msg, color="green"):
+        page.snack_bar = ft.SnackBar(ft.Text(msg), bgcolor=color)
+        page.snack_bar.open = True
+        page.update()
 
-    - name: Upload APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: app-release
-        path: build/app/outputs/flutter-apk/app-release.apk
+    # Utilitário: Pegar foto da galeria
+    def on_file_picked(e: ft.FilePickerResultEvent):
+        if e.files:
+            try:
+                with open(e.files[0].path, "rb") as f:
+                    # Converte imagem para texto (base64) para salvar no banco
+                    state.temp_img = base64.b64encode(f.read()).decode("utf-8")
+                    show_snack("Imagem carregada!", "blue")
+            except: 
+                show_snack("Erro ao carregar imagem", "red")
+
+    file_picker = ft.FilePicker(on_result=on_file_picked)
+    page.overlay.append(file_picker)
+
+    # ==============================================================================
+    # 📱 TELAS DO APLICATIVO
+    # ==============================================================================
+
+    # --- 1. TELA DE LOGIN ---
+    def view_login():
+        user = ft.TextField(label="Usuário", bgcolor="white", border_radius=10)
+        pwd = ft.TextField(label="Senha", password=True, bgcolor="white", border_radius=10)
+        btn_entrar = ft.ElevatedButton("ENTRAR", width=300, height=50, bgcolor=COLOR_HEADER, color="white")
+        
+        def logar(e):
+            btn_entrar.text = "Conectando..."
+            btn_entrar.update()
+            
+            conn = get_conn()
+            if not conn: 
+                btn_entrar.text = "ENTRAR"; btn_entrar.update()
+                return show_snack("Erro de conexão com a internet", "red")
+            
+            try:
+                # Busca usuário no banco
+                res = conn.run("SELECT id, nome, role, foto FROM usuarios WHERE usuario=:u AND senha=:p", u=user.value, p=pwd.value)
+                conn.close()
+                
+                if res:
+                    # Salva dados do usuário na memória do app
+                    state.usuario = {"id": res[0][0], "nome": res[0][1], "role": res[0][2], "foto": res[0][3]}
+                    page.go("/home")
+                else:
+                    show_snack("Usuário ou senha incorretos", "red")
+            except Exception as err:
+                show_snack(f"Erro no sistema: {err}", "red")
+            
+            btn_entrar.text = "ENTRAR"; btn_entrar.update()
+
+        btn_entrar.on_click = logar
+
+        return ft.View("/", [
+            ft.Container(
+                padding=40,
+                content=ft.Column([
+                    ft.Icon(ft.icons.CHURCH, size=80, color=COLOR_PRIMARY),
+                    ft.Text("IEQ KIDS", size=30, weight="bold", color=COLOR_HEADER),
+                    ft.Text("Ministério Infantil", size=16, color="grey"),
+                    ft.Container(height=40),
+                    user, 
+                    pwd,
+                    ft.Container(height=20),
+                    btn_entrar
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, alignment=ft.MainAxisAlignment.CENTER),
+                alignment=ft.alignment.center, expand=True, bgcolor="white"
+            )
+        ])
+
+    # --- 2. TELA PRINCIPAL (HOME) ---
+    def view_home():
+        if not state.usuario: page.go("/"); return ft.View("/", [])
+        
+        # Cria avatar com a foto ou ícone padrão
+        foto_perfil = ft.CircleAvatar(radius=30, content=ft.Icon(ft.icons.PERSON))
+        if state.usuario['foto']:
+            foto_perfil = ft.CircleAvatar(radius=30, src_base64=state.usuario['foto'])
+
+        # Cria os botões grandes do menu
+        def criar_botao(icon, text, route, color):
+            return ft.Container(
+                width=150, height=120, bgcolor=color, border_radius=15,
+                padding=10, on_click=lambda _: page.go(route),
+                content=ft.Column([
+                    ft.Icon(icon, size=40, color="white"),
+                    ft.Text(text, weight="bold", color="white", size=16)
+                ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
+            )
+
+        # Ação inteligente do botão de aula
+        def ir_aula(_):
+            page.go("/chamada" if state.aula_id else "/nova_aula")
+
+        # Botão de aula separado para configurar o clique
+        btn_aula = criar_botao(ft.icons.ROCKET_LAUNCH, "Aula", "", "#10B981") # Verde
+        btn_aula.on_click = ir_aula
+
+        return ft.View("/home", [
+            # Cabeçalho
+            ft.Container(padding=20, bgcolor="white", content=ft.Row([
+                foto_perfil,
+                ft.Column([
+                    ft.Text(f"Olá, {state.usuario['nome'].split()[0]}", weight="bold", size=18, color="black"),
+                    ft.Text(state.usuario['role'].upper(), size=12, color="grey")
+                ], spacing=2),
+                ft.IconButton(ft.icons.LOGOUT, icon_color="red", on_click=lambda _: page.go("/"))
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)),
+
+            # Grade de Menu
+            ft.Container(padding=20, content=ft.Column([
+                ft.Row([
+                    criar_botao(ft.icons.DASHBOARD, "Mural", "/mural", "#3B82F6"), # Azul
+                    criar_botao(ft.icons.CHILD_CARE, "Alunos", "/alunos", "#F59E0B") # Laranja
+                ], alignment=ft.MainAxisAlignment.CENTER),
+                ft.Container(height=10),
+                ft.Row([
+                    btn_aula, 
+                    criar_botao(ft.icons.GROUPS, "Equipe", "/equipe", "#8B5CF6") # Roxo
+                ], alignment=ft.MainAxisAlignment.CENTER),
+            ]))
+        ], bgcolor=COLOR_BG)
+
+    # --- 3. MURAL ---
+    def view_mural():
+        lista_posts = ft.ListView(expand=True, spacing=10, padding=10)
+        
+        conn = get_conn()
+        if conn:
+            # Pega avisos do banco
+            res = conn.run("SELECT mensagem, autor, data_criacao, fixado, imagem FROM avisos ORDER BY fixado DESC, data_criacao DESC LIMIT 20")
+            conn.close()
+
+            for msg, aut, dt, fix, img in res:
+                col_content = [
+                    ft.Row([
+                        ft.Icon(ft.icons.PUSH_PIN, size=14, color="blue") if fix else ft.Container(),
+                        ft.Text(f"{aut} • {dt.strftime('%d/%m')}", size=12, color="grey")
+                    ]),
+                    ft.Text(msg, size=15, color="#1E293B")
+                ]
+                if img:
+                    col_content.append(ft.Image(src_base64=img, fit=ft.ImageFit.COVER, border_radius=8))
+
+                card = ft.Container(bgcolor="white", padding=15, border_radius=10, content=ft.Column(col_content))
+                lista_posts.controls.append(card)
+
+        btn_add = ft.FloatingActionButton(icon=ft.icons.ADD, on_click=lambda _: page.go("/novo_aviso"))
+        
+        return ft.View("/mural", [
+            ft.AppBar(title=ft.Text("Mural de Avisos"), bgcolor=COLOR_HEADER, color="white"),
+            lista_posts
+        ], floating_action_button=btn_add, bgcolor=COLOR_BG)
+
+    def view_novo_aviso():
+        txt_msg = ft.TextField(label="Escreva seu aviso...", multiline=True, min_lines=5, bgcolor="white")
+        state.temp_img = None
+        
+        def salvar(e):
+            if not txt_msg.value: return
+            conn = get_conn()
+            conn.run("INSERT INTO avisos (mensagem, data_criacao, autor, imagem) VALUES (:m, NOW(), :a, :i)", 
+                     m=txt_msg.value, a=state.usuario['nome'], i=state.temp_img)
+            conn.close()
+            page.go("/mural")
+
+        return ft.View("/novo_aviso", [
+            ft.AppBar(title=ft.Text("Novo Aviso"), bgcolor=COLOR_HEADER, color="white"),
+            ft.Container(padding=20, content=ft.Column([
+                txt_msg,
+                ft.ElevatedButton("📷 Adicionar Foto", icon=ft.icons.CAMERA_ALT, on_click=lambda _: file_picker.pick_files()),
+                ft.Container(height=20),
+                ft.ElevatedButton("PUBLICAR", on_click=salvar, bgcolor=COLOR_PRIMARY, color="white", width=300, height=50)
+            ]))
+        ], bgcolor=COLOR_BG)
+
+    # --- 4. ALUNOS ---
+    def view_alunos():
+        lista_alunos = ft.ListView(expand=True, spacing=5, padding=10)
+        campo_busca = ft.TextField(prefix_icon=ft.icons.SEARCH, hint_text="Buscar criança...", bgcolor="white")
+
+        def carregar(termo=""):
+            lista_alunos.controls.clear()
+            conn = get_conn()
+            busca = f"%{termo}%"
+            res = conn.run("SELECT id, nome, responsavel, foto FROM alunos WHERE nome ILIKE :t ORDER BY nome LIMIT 50", t=busca)
+            conn.close()
+
+            for aid, nome, resp, foto in res:
+                avatar = ft.CircleAvatar(src_base64=foto) if foto else ft.CircleAvatar(content=ft.Text(nome[0]))
+                
+                card = ft.Container(
+                    bgcolor="white", padding=10, border_radius=10,
+                    on_click=lambda _, x=aid: page.go(f"/form_aluno?id={x}"),
+                    content=ft.Row([
+                        avatar,
+                        ft.Column([
+                            ft.Text(nome, weight="bold", color="black"),
+                            ft.Text(resp, size=12, color="grey")
+                        ], expand=True),
+                        ft.Icon(ft.icons.EDIT, color="blue")
+                    ])
+                )
+                lista_alunos.controls.append(card)
+            page.update()
+
+        campo_busca.on_change = lambda e: carregar(e.control.value)
+        carregar()
+
+        return ft.View("/alunos", [
+            ft.AppBar(title=ft.Text("Crianças"), bgcolor=COLOR_HEADER, color="white"),
+            ft.Container(content=campo_busca, padding=10),
+            lista_alunos
+        ], floating_action_button=ft.FloatingActionButton(icon=ft.icons.ADD, on_click=lambda _: page.go("/form_aluno")), bgcolor=COLOR_BG)
+
+    def view_form_aluno(id_aluno=None):
+        # Campos
+        vals = [""] * 4
+        state.temp_img = None
+
+        if id_aluno:
+            conn = get_conn()
+            res = conn.run("SELECT nome, responsavel, telefone, observacoes, foto FROM alunos WHERE id=:i", i=id_aluno)
+            conn.close()
+            if res:
+                vals = res[0][:4]
+                state.temp_img = res[0][4]
+
+        nome = ft.TextField(label="Nome Completo", value=vals[0], bgcolor="white")
+        resp = ft.TextField(label="Responsável", value=vals[1], bgcolor="white")
+        tel = ft.TextField(label="Telefone", value=vals[2], keyboard_type=ft.KeyboardType.PHONE, bgcolor="white")
+        obs = ft.TextField(label="Alergias / Obs", value=vals[3], multiline=True, bgcolor="#FEF2F2")
+
+        def salvar(e):
+            conn = get_conn()
+            if id_aluno:
+                conn.run("UPDATE alunos SET nome=:n, responsavel=:r, telefone=:t, observacoes=:o, foto=:f WHERE id=:i",
+                         n=nome.value, r=resp.value, t=tel.value, o=obs.value, f=state.temp_img, i=id_aluno)
+            else:
+                conn.run("INSERT INTO alunos (nome, responsavel, telefone, observacoes, foto) VALUES (:n, :r, :t, :o, :f)",
+                         n=nome.value, r=resp.value, t=tel.value, o=obs.value, f=state.temp_img)
+            conn.close()
+            page.go("/alunos")
+
+        return ft.View("/form_aluno", [
+            ft.AppBar(title=ft.Text("Cadastro"), bgcolor=COLOR_HEADER, color="white"),
+            ft.Column([
+                nome, resp, tel, obs,
+                ft.ElevatedButton("📷 Alterar Foto", icon=ft.icons.CAMERA_ALT, on_click=lambda _: file_picker.pick_files()),
+                ft.Container(height=20),
+                ft.ElevatedButton("SALVAR DADOS", on_click=salvar, bgcolor="green", color="white", width=300, height=50)
+            ], padding=20, scroll=ft.ScrollMode.AUTO)
+        ], bgcolor=COLOR_BG)
+
+    # --- 5. ROTEADOR DE PÁGINAS ---
+    def route_change(route):
+        page.views.clear()
+        
+        # Sempre adiciona login primeiro
+        page.views.append(view_login())
+
+        if page.route == "/home": page.views.append(view_home())
+        if page.route == "/mural": page.views.append(view_mural())
+        if page.route == "/novo_aviso": page.views.append(view_novo_aviso())
+        if page.route == "/alunos": page.views.append(view_alunos())
+        
+        # Tratamento especial para edição de aluno (pegar ID da URL)
+        if page.route.startswith("/form_aluno"):
+            try:
+                aid = page.route.split("=")[1]
+            except:
+                aid = None
+            page.views.append(view_form_aluno(aid))
+            
+        page.update()
+
+    def view_pop(view):
+        page.views.pop()
+        top_view = page.views[-1]
+        page.go(top_view.route)
+
+    page.on_route_change = route_change
+    page.on_view_pop = view_pop
+    page.go("/")
+
+ft.app(target=main)
